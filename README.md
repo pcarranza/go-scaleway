@@ -12,6 +12,7 @@ This package contains facilities to play with the Scaleway API, it includes the 
 - [API documentation](https://developer.scaleway.com)
 - [Official Python SDK](https://github.com/scaleway/python-scaleway)
 - Projects using this SDK
+  - https://github.com/scaleway/scaleway-cli
   - https://github.com/scaleway/devhub
   - https://github.com/scaleway/docker-machine-driver-scaleway
   - https://github.com/huseyin/docker-machine-driver-scaleway

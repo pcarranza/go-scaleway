@@ -1,4 +1,4 @@
-// Copyright (C) 2015 Scaleway. All rights reserved.
+// Copyright (C) 2018 Scaleway. All rights reserved.
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE.md file.
 
@@ -24,10 +24,13 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
-	"text/template"
 	"time"
 
 	"golang.org/x/sync/errgroup"
+
+	"github.com/scaleway/go-scaleway/cache"
+	"github.com/scaleway/go-scaleway/logger"
+	"github.com/scaleway/go-scaleway/types"
 )
 
 // Default values
@@ -64,7 +67,7 @@ const (
 	perPage = 50
 )
 
-// ScalewayAPI is the interface used to communicate with the Scaleway API
+// types.ScalewayAPI is the interface used to communicate with the Scaleway API
 type ScalewayAPI struct {
 	// Organization is the identifier of the Scaleway organization
 	Organization string
@@ -78,7 +81,7 @@ type ScalewayAPI struct {
 	userAgent string
 
 	// Cache is used to quickly resolve identifiers from names
-	Cache *ScalewayCache
+	Cache *cache.ScalewayCache
 
 	client     *http.Client
 	verbose    bool
@@ -86,850 +89,16 @@ type ScalewayAPI struct {
 
 	Region string
 	//
-	Logger
+	logger.Logger
 }
 
-// ScalewayAPIError represents a Scaleway API Error
-type ScalewayAPIError struct {
-	// Message is a human-friendly error message
-	APIMessage string `json:"message,omitempty"`
-
-	// Type is a string code that defines the kind of error
-	Type string `json:"type,omitempty"`
-
-	// Fields contains detail about validation error
-	Fields map[string][]string `json:"fields,omitempty"`
-
-	// StatusCode is the HTTP status code received
-	StatusCode int `json:"-"`
-
-	// Message
-	Message string `json:"-"`
-}
-
-// Error returns a string representing the error
-func (e ScalewayAPIError) Error() string {
-	var b bytes.Buffer
-
-	fmt.Fprintf(&b, "StatusCode: %v, ", e.StatusCode)
-	fmt.Fprintf(&b, "Type: %v, ", e.Type)
-	fmt.Fprintf(&b, "APIMessage: \x1b[31m%v\x1b[0m", e.APIMessage)
-	if len(e.Fields) > 0 {
-		fmt.Fprintf(&b, ", Details: %v", e.Fields)
-	}
-	return b.String()
-}
-
-// HideAPICredentials removes API credentials from a string
-func (s *ScalewayAPI) HideAPICredentials(input string) string {
-	output := input
-	if s.Token != "" {
-		output = strings.Replace(output, s.Token, "00000000-0000-4000-8000-000000000000", -1)
-	}
-	if s.Organization != "" {
-		output = strings.Replace(output, s.Organization, "00000000-0000-5000-9000-000000000000", -1)
-	}
-	if s.password != "" {
-		output = strings.Replace(output, s.password, "XX-XX-XX-XX", -1)
-	}
-	return output
-}
-
-// ScalewayIPAddress represents a Scaleway IP address
-type ScalewayIPAddress struct {
-	// Identifier is a unique identifier for the IP address
-	Identifier string `json:"id,omitempty"`
-
-	// IP is an IPv4 address
-	IP string `json:"address,omitempty"`
-
-	// Dynamic is a flag that defines an IP that change on each reboot
-	Dynamic *bool `json:"dynamic,omitempty"`
-}
-
-// ScalewayVolume represents a Scaleway Volume
-type ScalewayVolume struct {
-	// Identifier is a unique identifier for the volume
-	Identifier string `json:"id,omitempty"`
-
-	// Size is the allocated size of the volume
-	Size uint64 `json:"size,omitempty"`
-
-	// CreationDate is the creation date of the volume
-	CreationDate string `json:"creation_date,omitempty"`
-
-	// ModificationDate is the date of the last modification of the volume
-	ModificationDate string `json:"modification_date,omitempty"`
-
-	// Organization is the organization owning the volume
-	Organization string `json:"organization,omitempty"`
-
-	// Name is the name of the volume
-	Name string `json:"name,omitempty"`
-
-	// Server is the server using this image
-	Server *struct {
-		Identifier string `json:"id,omitempty"`
-		Name       string `json:"name,omitempty"`
-	} `json:"server,omitempty"`
-
-	// VolumeType is a Scaleway identifier for the kind of volume (default: l_ssd)
-	VolumeType string `json:"volume_type,omitempty"`
-
-	// ExportURI represents the url used by initrd/scripts to attach the volume
-	ExportURI string `json:"export_uri,omitempty"`
-}
-
-// ScalewayOneVolume represents the response of a GET /volumes/UUID API call
-type ScalewayOneVolume struct {
-	Volume ScalewayVolume `json:"volume,omitempty"`
-}
-
-// ScalewayVolumes represents a group of Scaleway volumes
-type ScalewayVolumes struct {
-	// Volumes holds scaleway volumes of the response
-	Volumes []ScalewayVolume `json:"volumes,omitempty"`
-}
-
-// ScalewayVolumeDefinition represents a Scaleway volume definition
-type ScalewayVolumeDefinition struct {
-	// Name is the user-defined name of the volume
-	Name string `json:"name"`
-
-	// Image is the image used by the volume
-	Size uint64 `json:"size"`
-
-	// Bootscript is the bootscript used by the volume
-	Type string `json:"volume_type"`
-
-	// Organization is the owner of the volume
-	Organization string `json:"organization"`
-}
-
-// ScalewayVolumePutDefinition represents a Scaleway volume with nullable fields (for PUT)
-type ScalewayVolumePutDefinition struct {
-	Identifier       *string `json:"id,omitempty"`
-	Size             *uint64 `json:"size,omitempty"`
-	CreationDate     *string `json:"creation_date,omitempty"`
-	ModificationDate *string `json:"modification_date,omitempty"`
-	Organization     *string `json:"organization,omitempty"`
-	Name             *string `json:"name,omitempty"`
-	Server           struct {
-		Identifier *string `json:"id,omitempty"`
-		Name       *string `json:"name,omitempty"`
-	} `json:"server,omitempty"`
-	VolumeType *string `json:"volume_type,omitempty"`
-	ExportURI  *string `json:"export_uri,omitempty"`
-}
-
-// ScalewayImage represents a Scaleway Image
-type ScalewayImage struct {
-	// Identifier is a unique identifier for the image
-	Identifier string `json:"id,omitempty"`
-
-	// Name is a user-defined name for the image
-	Name string `json:"name,omitempty"`
-
-	// CreationDate is the creation date of the image
-	CreationDate string `json:"creation_date,omitempty"`
-
-	// ModificationDate is the date of the last modification of the image
-	ModificationDate string `json:"modification_date,omitempty"`
-
-	// RootVolume is the root volume bound to the image
-	RootVolume ScalewayVolume `json:"root_volume,omitempty"`
-
-	// Public is true for public images and false for user images
-	Public bool `json:"public,omitempty"`
-
-	// Bootscript is the bootscript bound to the image
-	DefaultBootscript *ScalewayBootscript `json:"default_bootscript,omitempty"`
-
-	// Organization is the owner of the image
-	Organization string `json:"organization,omitempty"`
-
-	// Arch is the architecture target of the image
-	Arch string `json:"arch,omitempty"`
-
-	// FIXME: extra_volumes
-}
-
-// ScalewayImageIdentifier represents a Scaleway Image Identifier
-type ScalewayImageIdentifier struct {
-	Identifier string
-	Arch       string
-	Region     string
-	Owner      string
-}
-
-// ScalewayOneImage represents the response of a GET /images/UUID API call
-type ScalewayOneImage struct {
-	Image ScalewayImage `json:"image,omitempty"`
-}
-
-// ScalewayImages represents a group of Scaleway images
-type ScalewayImages struct {
-	// Images holds scaleway images of the response
-	Images []ScalewayImage `json:"images,omitempty"`
-}
-
-// ProductNetworkInterface gives interval and external allowed bandwidth
-type ProductNetworkInterface struct {
-	InternalBandwidth uint64 `json:"internal_bandwidth,omitempty"`
-	InternetBandwidth uint64 `json:"internet_bandwidth,omitempty"`
-}
-
-// ProductNetwork lists all the network interfaces
-type ProductNetwork struct {
-	Interfaces             []ProductNetworkInterface `json:"interfaces,omitempty"`
-	TotalInternalBandwidth uint64                    `json:"sum_internal_bandwidth,omitempty"`
-	TotalInternetBandwidth uint64                    `json:"sum_internet_bandwidth,omitempty"`
-	IPv6_Support           bool                      `json:"ipv6_support,omitempty"`
-}
-
-// ProductVolumeConstraint contains any volume constraint that the offer has
-type ProductVolumeConstraint struct {
-	MinSize uint64 `json:"min_size,omitempty"`
-	MaxSize uint64 `json:"max_size,omitempty"`
-}
-
-// ProductServerOffer represents a specific offer
-type ProductServer struct {
-	Arch              string                  `json:"arch,omitempty"`
-	Ncpus             uint64                  `json:"ncpus,omitempty"`
-	Ram               uint64                  `json:"ram,omitempty"`
-	Baremetal         bool                    `json:"baremetal,omitempty"`
-	VolumesConstraint ProductVolumeConstraint `json:"volumes_constraint,omitempty"`
-	AltNames          []string                `json:"alt_names,omitempty"`
-	Network           ProductNetwork          `json:"network,omitempty"`
-}
-
-// Products holds a map of all Scaleway servers
-type ScalewayProductsServers struct {
-	Servers map[string]ProductServer `json:"servers"`
-}
-
-// ScalewaySnapshot represents a Scaleway Snapshot
-type ScalewaySnapshot struct {
-	// Identifier is a unique identifier for the snapshot
-	Identifier string `json:"id,omitempty"`
-
-	// Name is a user-defined name for the snapshot
-	Name string `json:"name,omitempty"`
-
-	// CreationDate is the creation date of the snapshot
-	CreationDate string `json:"creation_date,omitempty"`
-
-	// ModificationDate is the date of the last modification of the snapshot
-	ModificationDate string `json:"modification_date,omitempty"`
-
-	// Size is the allocated size of the volume
-	Size uint64 `json:"size,omitempty"`
-
-	// Organization is the owner of the snapshot
-	Organization string `json:"organization"`
-
-	// State is the current state of the snapshot
-	State string `json:"state"`
-
-	// VolumeType is the kind of volume behind the snapshot
-	VolumeType string `json:"volume_type"`
-
-	// BaseVolume is the volume from which the snapshot inherits
-	BaseVolume ScalewayVolume `json:"base_volume,omitempty"`
-}
-
-// ScalewayOneSnapshot represents the response of a GET /snapshots/UUID API call
-type ScalewayOneSnapshot struct {
-	Snapshot ScalewaySnapshot `json:"snapshot,omitempty"`
-}
-
-// ScalewaySnapshots represents a group of Scaleway snapshots
-type ScalewaySnapshots struct {
-	// Snapshots holds scaleway snapshots of the response
-	Snapshots []ScalewaySnapshot `json:"snapshots,omitempty"`
-}
-
-// ScalewayBootscript represents a Scaleway Bootscript
-type ScalewayBootscript struct {
-	Bootcmdargs string `json:"bootcmdargs,omitempty"`
-	Dtb         string `json:"dtb,omitempty"`
-	Initrd      string `json:"initrd,omitempty"`
-	Kernel      string `json:"kernel,omitempty"`
-
-	// Arch is the architecture target of the bootscript
-	Arch string `json:"architecture,omitempty"`
-
-	// Identifier is a unique identifier for the bootscript
-	Identifier string `json:"id,omitempty"`
-
-	// Organization is the owner of the bootscript
-	Organization string `json:"organization,omitempty"`
-
-	// Name is a user-defined name for the bootscript
-	Title string `json:"title,omitempty"`
-
-	// Public is true for public bootscripts and false for user bootscripts
-	Public bool `json:"public,omitempty"`
-
-	Default bool `json:"default,omitempty"`
-}
-
-// ScalewayOneBootscript represents the response of a GET /bootscripts/UUID API call
-type ScalewayOneBootscript struct {
-	Bootscript ScalewayBootscript `json:"bootscript,omitempty"`
-}
-
-// ScalewayBootscripts represents a group of Scaleway bootscripts
-type ScalewayBootscripts struct {
-	// Bootscripts holds Scaleway bootscripts of the response
-	Bootscripts []ScalewayBootscript `json:"bootscripts,omitempty"`
-}
-
-// ScalewayTask represents a Scaleway Task
-type ScalewayTask struct {
-	// Identifier is a unique identifier for the task
-	Identifier string `json:"id,omitempty"`
-
-	// StartDate is the start date of the task
-	StartDate string `json:"started_at,omitempty"`
-
-	// TerminationDate is the termination date of the task
-	TerminationDate string `json:"terminated_at,omitempty"`
-
-	HrefFrom string `json:"href_from,omitempty"`
-
-	Description string `json:"description,omitempty"`
-
-	Status string `json:"status,omitempty"`
-
-	Progress int `json:"progress,omitempty"`
-}
-
-// ScalewayOneTask represents the response of a GET /tasks/UUID API call
-type ScalewayOneTask struct {
-	Task ScalewayTask `json:"task,omitempty"`
-}
-
-// ScalewayTasks represents a group of Scaleway tasks
-type ScalewayTasks struct {
-	// Tasks holds scaleway tasks of the response
-	Tasks []ScalewayTask `json:"tasks,omitempty"`
-}
-
-// ScalewaySecurityGroupRule definition
-type ScalewaySecurityGroupRule struct {
-	Direction    string `json:"direction"`
-	Protocol     string `json:"protocol"`
-	IPRange      string `json:"ip_range"`
-	DestPortFrom int    `json:"dest_port_from,omitempty"`
-	Action       string `json:"action"`
-	Position     int    `json:"position"`
-	DestPortTo   string `json:"dest_port_to"`
-	Editable     bool   `json:"editable"`
-	ID           string `json:"id"`
-}
-
-// ScalewayGetSecurityGroupRules represents the response of a GET /security_group/{groupID}/rules
-type ScalewayGetSecurityGroupRules struct {
-	Rules []ScalewaySecurityGroupRule `json:"rules"`
-}
-
-// ScalewayGetSecurityGroupRule represents the response of a GET /security_group/{groupID}/rules/{ruleID}
-type ScalewayGetSecurityGroupRule struct {
-	Rules ScalewaySecurityGroupRule `json:"rule"`
-}
-
-// ScalewayNewSecurityGroupRule definition POST/PUT request /security_group/{groupID}
-type ScalewayNewSecurityGroupRule struct {
-	Action       string `json:"action"`
-	Direction    string `json:"direction"`
-	IPRange      string `json:"ip_range"`
-	Protocol     string `json:"protocol"`
-	DestPortFrom int    `json:"dest_port_from,omitempty"`
-}
-
-// ScalewaySecurityGroups definition
-type ScalewaySecurityGroups struct {
-	Description           string                  `json:"description"`
-	ID                    string                  `json:"id"`
-	Organization          string                  `json:"organization"`
-	Name                  string                  `json:"name"`
-	Servers               []ScalewaySecurityGroup `json:"servers"`
-	EnableDefaultSecurity bool                    `json:"enable_default_security"`
-	OrganizationDefault   bool                    `json:"organization_default"`
-}
-
-// ScalewayGetSecurityGroups represents the response of a GET /security_groups/
-type ScalewayGetSecurityGroups struct {
-	SecurityGroups []ScalewaySecurityGroups `json:"security_groups"`
-}
-
-// ScalewayGetSecurityGroup represents the response of a GET /security_groups/{groupID}
-type ScalewayGetSecurityGroup struct {
-	SecurityGroups ScalewaySecurityGroups `json:"security_group"`
-}
-
-// ScalewayIPDefinition represents the IP's fields
-type ScalewayIPDefinition struct {
-	Organization string  `json:"organization"`
-	Reverse      *string `json:"reverse"`
-	ID           string  `json:"id"`
-	Server       *struct {
-		Identifier string `json:"id,omitempty"`
-		Name       string `json:"name,omitempty"`
-	} `json:"server"`
-	Address string `json:"address"`
-}
-
-// ScalewayGetIPS represents the response of a GET /ips/
-type ScalewayGetIPS struct {
-	IPS []ScalewayIPDefinition `json:"ips"`
-}
-
-// ScalewayGetIP represents the response of a GET /ips/{id_ip}
-type ScalewayGetIP struct {
-	IP ScalewayIPDefinition `json:"ip"`
-}
-
-// ScalewaySecurityGroup represents a Scaleway security group
-type ScalewaySecurityGroup struct {
-	// Identifier is a unique identifier for the security group
-	Identifier string `json:"id,omitempty"`
-
-	// Name is the user-defined name of the security group
-	Name string `json:"name,omitempty"`
-}
-
-// ScalewayNewSecurityGroup definition POST request /security_groups
-type ScalewayNewSecurityGroup struct {
-	Organization string `json:"organization"`
-	Name         string `json:"name"`
-	Description  string `json:"description"`
-}
-
-// ScalewayUpdateSecurityGroup definition PUT request /security_groups
-type ScalewayUpdateSecurityGroup struct {
-	Organization        string `json:"organization"`
-	Name                string `json:"name"`
-	Description         string `json:"description"`
-	OrganizationDefault bool   `json:"organization_default"`
-}
-
-// ScalewayServer represents a Scaleway server
-type ScalewayServer struct {
-	// Arch is the architecture target of the server
-	Arch string `json:"arch,omitempty"`
-
-	// Identifier is a unique identifier for the server
-	Identifier string `json:"id,omitempty"`
-
-	// Name is the user-defined name of the server
-	Name string `json:"name,omitempty"`
-
-	// CreationDate is the creation date of the server
-	CreationDate string `json:"creation_date,omitempty"`
-
-	// ModificationDate is the date of the last modification of the server
-	ModificationDate string `json:"modification_date,omitempty"`
-
-	// Image is the image used by the server
-	Image ScalewayImage `json:"image,omitempty"`
-
-	// DynamicIPRequired is a flag that defines a server with a dynamic ip address attached
-	DynamicIPRequired *bool `json:"dynamic_ip_required,omitempty"`
-
-	// PublicIP is the public IP address bound to the server
-	PublicAddress ScalewayIPAddress `json:"public_ip,omitempty"`
-
-	// State is the current status of the server
-	State string `json:"state,omitempty"`
-
-	// StateDetail is the detailed status of the server
-	StateDetail string `json:"state_detail,omitempty"`
-
-	// PrivateIP represents the private IPV4 attached to the server (changes on each boot)
-	PrivateIP string `json:"private_ip,omitempty"`
-
-	// Bootscript is the unique identifier of the selected bootscript
-	Bootscript *ScalewayBootscript `json:"bootscript,omitempty"`
-
-	// Hostname represents the ServerName in a format compatible with unix's hostname
-	Hostname string `json:"hostname,omitempty"`
-
-	// Tags represents user-defined tags
-	Tags []string `json:"tags,omitempty"`
-
-	// Volumes are the attached volumes
-	Volumes map[string]ScalewayVolume `json:"volumes,omitempty"`
-
-	// SecurityGroup is the selected security group object
-	SecurityGroup ScalewaySecurityGroup `json:"security_group,omitempty"`
-
-	// Organization is the owner of the server
-	Organization string `json:"organization,omitempty"`
-
-	// CommercialType is the commercial type of the server (i.e: C1, C2[SML], VC1S)
-	CommercialType string `json:"commercial_type,omitempty"`
-
-	// Location of the server
-	Location struct {
-		Platform   string `json:"platform_id,omitempty"`
-		Chassis    string `json:"chassis_id,omitempty"`
-		Cluster    string `json:"cluster_id,omitempty"`
-		Hypervisor string `json:"hypervisor_id,omitempty"`
-		Blade      string `json:"blade_id,omitempty"`
-		Node       string `json:"node_id,omitempty"`
-		ZoneID     string `json:"zone_id,omitempty"`
-	} `json:"location,omitempty"`
-
-	IPV6 *ScalewayIPV6Definition `json:"ipv6,omitempty"`
-
-	EnableIPV6 bool `json:"enable_ipv6,omitempty"`
-
-	// This fields are not returned by the API, we generate it
-	DNSPublic  string `json:"dns_public,omitempty"`
-	DNSPrivate string `json:"dns_private,omitempty"`
-}
-
-// ScalewayIPV6Definition represents a Scaleway ipv6
-type ScalewayIPV6Definition struct {
-	Netmask string `json:"netmask"`
-	Gateway string `json:"gateway"`
-	Address string `json:"address"`
-}
-
-// ScalewayServerPatchDefinition represents a Scaleway server with nullable fields (for PATCH)
-type ScalewayServerPatchDefinition struct {
-	Arch              *string                    `json:"arch,omitempty"`
-	Name              *string                    `json:"name,omitempty"`
-	CreationDate      *string                    `json:"creation_date,omitempty"`
-	ModificationDate  *string                    `json:"modification_date,omitempty"`
-	Image             *ScalewayImage             `json:"image,omitempty"`
-	DynamicIPRequired *bool                      `json:"dynamic_ip_required,omitempty"`
-	PublicAddress     *ScalewayIPAddress         `json:"public_ip,omitempty"`
-	State             *string                    `json:"state,omitempty"`
-	StateDetail       *string                    `json:"state_detail,omitempty"`
-	PrivateIP         *string                    `json:"private_ip,omitempty"`
-	Bootscript        *string                    `json:"bootscript,omitempty"`
-	Hostname          *string                    `json:"hostname,omitempty"`
-	Volumes           *map[string]ScalewayVolume `json:"volumes,omitempty"`
-	SecurityGroup     *ScalewaySecurityGroup     `json:"security_group,omitempty"`
-	Organization      *string                    `json:"organization,omitempty"`
-	Tags              *[]string                  `json:"tags,omitempty"`
-	IPV6              *ScalewayIPV6Definition    `json:"ipv6,omitempty"`
-	EnableIPV6        *bool                      `json:"enable_ipv6,omitempty"`
-}
-
-// ScalewayServerDefinition represents a Scaleway server with image definition
-type ScalewayServerDefinition struct {
-	// Name is the user-defined name of the server
-	Name string `json:"name"`
-
-	// Image is the image used by the server
-	Image *string `json:"image,omitempty"`
-
-	// Volumes are the attached volumes
-	Volumes map[string]string `json:"volumes,omitempty"`
-
-	// DynamicIPRequired is a flag that defines a server with a dynamic ip address attached
-	DynamicIPRequired *bool `json:"dynamic_ip_required,omitempty"`
-
-	// Bootscript is the bootscript used by the server
-	Bootscript *string `json:"bootscript"`
-
-	// Tags are the metadata tags attached to the server
-	Tags []string `json:"tags,omitempty"`
-
-	// Organization is the owner of the server
-	Organization string `json:"organization"`
-
-	// CommercialType is the commercial type of the server (i.e: C1, C2[SML], VC1S)
-	CommercialType string `json:"commercial_type"`
-
-	PublicIP string `json:"public_ip,omitempty"`
-
-	EnableIPV6 bool `json:"enable_ipv6,omitempty"`
-
-	SecurityGroup string `json:"security_group,omitempty"`
-}
-
-// ScalewayOneServer represents the response of a GET /servers/UUID API call
-type ScalewayOneServer struct {
-	Server ScalewayServer `json:"server,omitempty"`
-}
-
-// ScalewayServers represents a group of Scaleway servers
-type ScalewayServers struct {
-	// Servers holds scaleway servers of the response
-	Servers []ScalewayServer `json:"servers,omitempty"`
-}
-
-// ScalewayServerAction represents an action to perform on a Scaleway server
-type ScalewayServerAction struct {
-	// Action is the name of the action to trigger
-	Action string `json:"action,omitempty"`
-}
-
-// ScalewaySnapshotDefinition represents a Scaleway snapshot definition
-type ScalewaySnapshotDefinition struct {
-	VolumeIDentifier string `json:"volume_id"`
-	Name             string `json:"name,omitempty"`
-	Organization     string `json:"organization"`
-}
-
-// ScalewayImageDefinition represents a Scaleway image definition
-type ScalewayImageDefinition struct {
-	SnapshotIDentifier string  `json:"root_volume"`
-	Name               string  `json:"name,omitempty"`
-	Organization       string  `json:"organization"`
-	Arch               string  `json:"arch"`
-	DefaultBootscript  *string `json:"default_bootscript,omitempty"`
-}
-
-// ScalewayRoleDefinition represents a Scaleway Token UserId Role
-type ScalewayRoleDefinition struct {
-	Organization ScalewayOrganizationDefinition `json:"organization,omitempty"`
-	Role         string                         `json:"role,omitempty"`
-}
-
-// ScalewayTokenDefinition represents a Scaleway Token
-type ScalewayTokenDefinition struct {
-	UserID             string                 `json:"user_id"`
-	Description        string                 `json:"description,omitempty"`
-	Roles              ScalewayRoleDefinition `json:"roles"`
-	Expires            string                 `json:"expires"`
-	InheritsUsersPerms bool                   `json:"inherits_user_perms"`
-	ID                 string                 `json:"id"`
-}
-
-// ScalewayTokensDefinition represents a Scaleway Tokens
-type ScalewayTokensDefinition struct {
-	Token ScalewayTokenDefinition `json:"token"`
-}
-
-// ScalewayGetTokens represents a list of Scaleway Tokens
-type ScalewayGetTokens struct {
-	Tokens []ScalewayTokenDefinition `json:"tokens"`
-}
-
-// ScalewayContainerData represents a Scaleway container data (S3)
-type ScalewayContainerData struct {
-	LastModified string `json:"last_modified"`
-	Name         string `json:"name"`
-	Size         string `json:"size"`
-}
-
-// ScalewayGetContainerDatas represents a list of Scaleway containers data (S3)
-type ScalewayGetContainerDatas struct {
-	Container []ScalewayContainerData `json:"container"`
-}
-
-// ScalewayContainer represents a Scaleway container (S3)
-type ScalewayContainer struct {
-	ScalewayOrganizationDefinition `json:"organization"`
-	Name                           string `json:"name"`
-	Size                           string `json:"size"`
-}
-
-// ScalewayGetContainers represents a list of Scaleway containers (S3)
-type ScalewayGetContainers struct {
-	Containers []ScalewayContainer `json:"containers"`
-}
-
-// ScalewayConnectResponse represents the answer from POST /tokens
-type ScalewayConnectResponse struct {
-	Token ScalewayTokenDefinition `json:"token"`
-}
-
-// ScalewayConnect represents the data to connect
-type ScalewayConnect struct {
-	Email       string `json:"email"`
-	Password    string `json:"password"`
-	Description string `json:"description"`
-	Expires     bool   `json:"expires"`
-}
-
-// ScalewayConnectInterface is the interface implemented by ScalewayConnect,
-// ScalewayConnectByOTP and ScalewayConnectByBackupCode
-type ScalewayConnectInterface interface {
-	GetPassword() string
-}
-
-func (s *ScalewayConnect) GetPassword() string {
-	return s.Password
-}
-
-type ScalewayConnectByOTP struct {
-	ScalewayConnect
-	TwoFAToken string `json:"2FA_token"`
-}
-
-type ScalewayConnectByBackupCode struct {
-	ScalewayConnect
-	TwoFABackupCode string `json:"2FA_backup_code"`
-}
-
-// ScalewayOrganizationDefinition represents a Scaleway Organization
-type ScalewayOrganizationDefinition struct {
-	ID    string                   `json:"id"`
-	Name  string                   `json:"name"`
-	Users []ScalewayUserDefinition `json:"users"`
-}
-
-// ScalewayOrganizationsDefinition represents a Scaleway Organizations
-type ScalewayOrganizationsDefinition struct {
-	Organizations []ScalewayOrganizationDefinition `json:"organizations"`
-}
-
-// ScalewayUserDefinition represents a Scaleway User
-type ScalewayUserDefinition struct {
-	Email         string                           `json:"email"`
-	Firstname     string                           `json:"firstname"`
-	Fullname      string                           `json:"fullname"`
-	ID            string                           `json:"id"`
-	Lastname      string                           `json:"lastname"`
-	Organizations []ScalewayOrganizationDefinition `json:"organizations"`
-	Roles         []ScalewayRoleDefinition         `json:"roles"`
-	SSHPublicKeys []ScalewayKeyDefinition          `json:"ssh_public_keys"`
-}
-
-// ScalewayUsersDefinition represents the response of a GET /user
-type ScalewayUsersDefinition struct {
-	User ScalewayUserDefinition `json:"user"`
-}
-
-// ScalewayKeyDefinition represents a key
-type ScalewayKeyDefinition struct {
-	Key         string `json:"key"`
-	Fingerprint string `json:"fingerprint,omitempty"`
-}
-
-// ScalewayUserPatchSSHKeyDefinition represents a User Patch
-type ScalewayUserPatchSSHKeyDefinition struct {
-	SSHPublicKeys []ScalewayKeyDefinition `json:"ssh_public_keys"`
-}
-
-// ScalewayDashboardResp represents a dashboard received from the API
-type ScalewayDashboardResp struct {
-	Dashboard ScalewayDashboard
-}
-
-// ScalewayDashboard represents a dashboard
-type ScalewayDashboard struct {
-	VolumesCount        int `json:"volumes_count"`
-	RunningServersCount int `json:"running_servers_count"`
-	ImagesCount         int `json:"images_count"`
-	SnapshotsCount      int `json:"snapshots_count"`
-	ServersCount        int `json:"servers_count"`
-	IPsCount            int `json:"ips_count"`
-}
-
-// ScalewayPermissions represents the response of GET /permissions
-type ScalewayPermissions map[string]ScalewayPermCategory
-
-// ScalewayPermCategory represents ScalewayPermissions's fields
-type ScalewayPermCategory map[string][]string
-
-// ScalewayPermissionDefinition represents the permissions
-type ScalewayPermissionDefinition struct {
-	Permissions ScalewayPermissions `json:"permissions"`
-}
-
-// ScalewayUserdatas represents the response of a GET /user_data
-type ScalewayUserdatas struct {
-	UserData []string `json:"user_data"`
-}
-
-// ScalewayQuota represents a map of quota (name, value)
-type ScalewayQuota map[string]int
-
-// ScalewayGetQuotas represents the response of GET /organizations/{orga_id}/quotas
-type ScalewayGetQuotas struct {
-	Quotas ScalewayQuota `json:"quotas"`
-}
-
-// ScalewayUserdata represents []byte
-type ScalewayUserdata []byte
-
-// FuncMap used for json inspection
-var FuncMap = template.FuncMap{
-	"json": func(v interface{}) string {
-		a, _ := json.Marshal(v)
-		return string(a)
-	},
-}
-
-// MarketLocalImageDefinition represents localImage of marketplace version
-type MarketLocalImageDefinition struct {
-	Arch string `json:"arch"`
-	ID   string `json:"id"`
-	Zone string `json:"zone"`
-}
-
-// MarketLocalImages represents an array of local images
-type MarketLocalImages struct {
-	LocalImages []MarketLocalImageDefinition `json:"local_images"`
-}
-
-// MarketLocalImage represents local image
-type MarketLocalImage struct {
-	LocalImages MarketLocalImageDefinition `json:"local_image"`
-}
-
-// MarketVersionDefinition represents version of marketplace image
-type MarketVersionDefinition struct {
-	CreationDate string `json:"creation_date"`
-	ID           string `json:"id"`
-	Image        struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	} `json:"image"`
-	ModificationDate string `json:"modification_date"`
-	Name             string `json:"name"`
-	MarketLocalImages
-}
-
-// MarketVersions represents an array of marketplace image versions
-type MarketVersions struct {
-	Versions []MarketVersionDefinition `json:"versions"`
-}
-
-// MarketVersion represents version of marketplace image
-type MarketVersion struct {
-	Version MarketVersionDefinition `json:"version"`
-}
-
-// MarketImage represents MarketPlace image
-type MarketImage struct {
-	Categories           []string `json:"categories"`
-	CreationDate         string   `json:"creation_date"`
-	CurrentPublicVersion string   `json:"current_public_version"`
-	Description          string   `json:"description"`
-	ID                   string   `json:"id"`
-	Logo                 string   `json:"logo"`
-	ModificationDate     string   `json:"modification_date"`
-	Name                 string   `json:"name"`
-	Organization         struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	} `json:"organization"`
-	Public bool `json:"-"`
-	MarketVersions
-}
-
-// MarketImages represents MarketPlace images
-type MarketImages struct {
-	Images []MarketImage `json:"images"`
-}
-
-// NewScalewayAPI creates a ready-to-use ScalewayAPI client
+// Newtypes.ScalewayAPI creates a ready-to-use ScalewayAPI client
 func NewScalewayAPI(organization, token, userAgent, region string, options ...func(*ScalewayAPI)) (*ScalewayAPI, error) {
 	s := &ScalewayAPI{
 		// exposed
 		Organization: organization,
 		Token:        token,
-		Logger:       NewDefaultLogger(),
+		Logger:       logger.NewDefaultLogger(),
 
 		// internal
 		client:    &http.Client{},
@@ -940,7 +109,7 @@ func NewScalewayAPI(organization, token, userAgent, region string, options ...fu
 	for _, option := range options {
 		option(s)
 	}
-	cache, err := NewScalewayCache(func() { s.Logger.Debugf("Writing cache file to disk") })
+	cache, err := cache.NewScalewayCache(func() { s.Logger.Debugf("Writing cache file to disk") })
 	if err != nil {
 		return nil, err
 	}
@@ -1152,7 +321,7 @@ func (s *ScalewayAPI) handleHTTPError(goodStatusCode []int, resp *http.Response)
 		}
 	}
 	if !good {
-		var scwError ScalewayAPIError
+		var scwError types.ScalewayAPIError
 
 		if err := json.Unmarshal(body, &scwError); err != nil {
 			return nil, err
@@ -1164,7 +333,7 @@ func (s *ScalewayAPI) handleHTTPError(goodStatusCode []int, resp *http.Response)
 	return body, nil
 }
 
-func (s *ScalewayAPI) fetchServers(api string, query url.Values, out chan<- ScalewayServers) func() error {
+func (s *ScalewayAPI) fetchServers(api string, query url.Values, out chan<- types.ScalewayServers) func() error {
 	return func() error {
 		resp, err := s.GetResponsePaginate(api, "servers", query)
 		if err != nil {
@@ -1176,7 +345,7 @@ func (s *ScalewayAPI) fetchServers(api string, query url.Values, out chan<- Scal
 		if err != nil {
 			return err
 		}
-		var servers ScalewayServers
+		var servers types.ScalewayServers
 
 		if err = json.Unmarshal(body, &servers); err != nil {
 			return err
@@ -1187,7 +356,7 @@ func (s *ScalewayAPI) fetchServers(api string, query url.Values, out chan<- Scal
 }
 
 // GetServers gets the list of servers from the ScalewayAPI
-func (s *ScalewayAPI) GetServers(all bool, limit int) (*[]ScalewayServer, error) {
+func (s *ScalewayAPI) GetServers(all bool, limit int) (*[]types.ScalewayServer, error) {
 	query := url.Values{}
 	if !all {
 		query.Set("state", "running")
@@ -1208,7 +377,7 @@ func (s *ScalewayAPI) GetServers(all bool, limit int) (*[]ScalewayServer, error)
 		}
 	)
 
-	serverChan := make(chan ScalewayServers, 2)
+	serverChan := make(chan types.ScalewayServers, 2)
 	for _, api := range apis {
 		g.Go(s.fetchServers(api, query, serverChan))
 	}
@@ -1217,7 +386,7 @@ func (s *ScalewayAPI) GetServers(all bool, limit int) (*[]ScalewayServer, error)
 		return nil, err
 	}
 	close(serverChan)
-	var servers ScalewayServers
+	var servers types.ScalewayServers
 
 	for server := range serverChan {
 		servers.Servers = append(servers.Servers, server.Servers...)
@@ -1231,25 +400,8 @@ func (s *ScalewayAPI) GetServers(all bool, limit int) (*[]ScalewayServer, error)
 	return &servers.Servers, nil
 }
 
-// ScalewaySortServers represents a wrapper to sort by CreationDate the servers
-type ScalewaySortServers []ScalewayServer
-
-func (s ScalewaySortServers) Len() int {
-	return len(s)
-}
-
-func (s ScalewaySortServers) Swap(i, j int) {
-	s[i], s[j] = s[j], s[i]
-}
-
-func (s ScalewaySortServers) Less(i, j int) bool {
-	date1, _ := time.Parse("2006-01-02T15:04:05.000000+00:00", s[i].CreationDate)
-	date2, _ := time.Parse("2006-01-02T15:04:05.000000+00:00", s[j].CreationDate)
-	return date2.Before(date1)
-}
-
 // GetServer gets a server from the ScalewayAPI
-func (s *ScalewayAPI) GetServer(serverID string) (*ScalewayServer, error) {
+func (s *ScalewayAPI) GetServer(serverID string) (*types.ScalewayServer, error) {
 	if serverID == "" {
 		return nil, fmt.Errorf("cannot get server without serverID")
 	}
@@ -1264,7 +416,7 @@ func (s *ScalewayAPI) GetServer(serverID string) (*ScalewayServer, error) {
 		return nil, err
 	}
 
-	var oneServer ScalewayOneServer
+	var oneServer types.ScalewayOneServer
 
 	if err = json.Unmarshal(body, &oneServer); err != nil {
 		return nil, err
@@ -1278,7 +430,7 @@ func (s *ScalewayAPI) GetServer(serverID string) (*ScalewayServer, error) {
 
 // PostServerAction posts an action on a server
 func (s *ScalewayAPI) PostServerAction(serverID, action string) error {
-	data := ScalewayServerAction{
+	data := types.ScalewayServerAction{
 		Action: action,
 	}
 	resp, err := s.PostResponse(s.computeAPI, fmt.Sprintf("servers/%s/action", serverID), data)
@@ -1307,7 +459,7 @@ func (s *ScalewayAPI) DeleteServer(serverID string) error {
 }
 
 // PostServer creates a new server
-func (s *ScalewayAPI) PostServer(definition ScalewayServerDefinition) (string, error) {
+func (s *ScalewayAPI) PostServer(definition types.ScalewayServerDefinition) (string, error) {
 	definition.Organization = s.Organization
 
 	resp, err := s.PostResponse(s.computeAPI, "servers", definition)
@@ -1320,7 +472,7 @@ func (s *ScalewayAPI) PostServer(definition ScalewayServerDefinition) (string, e
 	if err != nil {
 		return "", err
 	}
-	var server ScalewayOneServer
+	var server types.ScalewayOneServer
 
 	if err = json.Unmarshal(body, &server); err != nil {
 		return "", err
@@ -1331,7 +483,7 @@ func (s *ScalewayAPI) PostServer(definition ScalewayServerDefinition) (string, e
 }
 
 // PatchUserSSHKey updates a user
-func (s *ScalewayAPI) PatchUserSSHKey(UserID string, definition ScalewayUserPatchSSHKeyDefinition) error {
+func (s *ScalewayAPI) PatchUserSSHKey(UserID string, definition types.ScalewayUserPatchSSHKeyDefinition) error {
 	resp, err := s.PatchResponse(AccountAPI, fmt.Sprintf("users/%s", UserID), definition)
 	if err != nil {
 		return err
@@ -1346,7 +498,7 @@ func (s *ScalewayAPI) PatchUserSSHKey(UserID string, definition ScalewayUserPatc
 }
 
 // PatchServer updates a server
-func (s *ScalewayAPI) PatchServer(serverID string, definition ScalewayServerPatchDefinition) error {
+func (s *ScalewayAPI) PatchServer(serverID string, definition types.ScalewayServerPatchDefinition) error {
 	resp, err := s.PatchResponse(s.computeAPI, fmt.Sprintf("servers/%s", serverID), definition)
 	if err != nil {
 		return err
@@ -1361,7 +513,7 @@ func (s *ScalewayAPI) PatchServer(serverID string, definition ScalewayServerPatc
 
 // PostSnapshot creates a new snapshot
 func (s *ScalewayAPI) PostSnapshot(volumeID string, name string) (string, error) {
-	definition := ScalewaySnapshotDefinition{
+	definition := types.ScalewaySnapshotDefinition{
 		VolumeIDentifier: volumeID,
 		Name:             name,
 		Organization:     s.Organization,
@@ -1376,7 +528,7 @@ func (s *ScalewayAPI) PostSnapshot(volumeID string, name string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	var snapshot ScalewayOneSnapshot
+	var snapshot types.ScalewayOneSnapshot
 
 	if err = json.Unmarshal(body, &snapshot); err != nil {
 		return "", err
@@ -1388,7 +540,7 @@ func (s *ScalewayAPI) PostSnapshot(volumeID string, name string) (string, error)
 
 // PostImage creates a new image
 func (s *ScalewayAPI) PostImage(volumeID string, name string, bootscript string, arch string) (string, error) {
-	definition := ScalewayImageDefinition{
+	definition := types.ScalewayImageDefinition{
 		SnapshotIDentifier: volumeID,
 		Name:               name,
 		Organization:       s.Organization,
@@ -1408,7 +560,7 @@ func (s *ScalewayAPI) PostImage(volumeID string, name string, bootscript string,
 	if err != nil {
 		return "", err
 	}
-	var image ScalewayOneImage
+	var image types.ScalewayOneImage
 
 	if err = json.Unmarshal(body, &image); err != nil {
 		return "", err
@@ -1419,7 +571,7 @@ func (s *ScalewayAPI) PostImage(volumeID string, name string, bootscript string,
 }
 
 // PostVolume creates a new volume
-func (s *ScalewayAPI) PostVolume(definition ScalewayVolumeDefinition) (string, error) {
+func (s *ScalewayAPI) PostVolume(definition types.ScalewayVolumeDefinition) (string, error) {
 	definition.Organization = s.Organization
 	if definition.Type == "" {
 		definition.Type = "l_ssd"
@@ -1435,7 +587,7 @@ func (s *ScalewayAPI) PostVolume(definition ScalewayVolumeDefinition) (string, e
 	if err != nil {
 		return "", err
 	}
-	var volume ScalewayOneVolume
+	var volume types.ScalewayOneVolume
 
 	if err = json.Unmarshal(body, &volume); err != nil {
 		return "", err
@@ -1445,7 +597,7 @@ func (s *ScalewayAPI) PostVolume(definition ScalewayVolumeDefinition) (string, e
 }
 
 // PutVolume updates a volume
-func (s *ScalewayAPI) PutVolume(volumeID string, definition ScalewayVolumePutDefinition) error {
+func (s *ScalewayAPI) PutVolume(volumeID string, definition types.ScalewayVolumePutDefinition) error {
 	resp, err := s.PutResponse(s.computeAPI, fmt.Sprintf("volumes/%s", volumeID), definition)
 	if err != nil {
 		return err
@@ -1457,7 +609,7 @@ func (s *ScalewayAPI) PutVolume(volumeID string, definition ScalewayVolumePutDef
 }
 
 // ResolveServer attempts to find a matching Identifier for the input string
-func (s *ScalewayAPI) ResolveServer(needle string) (ScalewayResolverResults, error) {
+func (s *ScalewayAPI) ResolveServer(needle string) (types.ScalewayResolverResults, error) {
 	servers, err := s.Cache.LookUpServers(needle, true)
 	if err != nil {
 		return servers, err
@@ -1472,7 +624,7 @@ func (s *ScalewayAPI) ResolveServer(needle string) (ScalewayResolverResults, err
 }
 
 // ResolveVolume attempts to find a matching Identifier for the input string
-func (s *ScalewayAPI) ResolveVolume(needle string) (ScalewayResolverResults, error) {
+func (s *ScalewayAPI) ResolveVolume(needle string) (types.ScalewayResolverResults, error) {
 	volumes, err := s.Cache.LookUpVolumes(needle, true)
 	if err != nil {
 		return volumes, err
@@ -1487,7 +639,7 @@ func (s *ScalewayAPI) ResolveVolume(needle string) (ScalewayResolverResults, err
 }
 
 // ResolveSnapshot attempts to find a matching Identifier for the input string
-func (s *ScalewayAPI) ResolveSnapshot(needle string) (ScalewayResolverResults, error) {
+func (s *ScalewayAPI) ResolveSnapshot(needle string) (types.ScalewayResolverResults, error) {
 	snapshots, err := s.Cache.LookUpSnapshots(needle, true)
 	if err != nil {
 		return snapshots, err
@@ -1502,7 +654,7 @@ func (s *ScalewayAPI) ResolveSnapshot(needle string) (ScalewayResolverResults, e
 }
 
 // ResolveImage attempts to find a matching Identifier for the input string
-func (s *ScalewayAPI) ResolveImage(needle string) (ScalewayResolverResults, error) {
+func (s *ScalewayAPI) ResolveImage(needle string) (types.ScalewayResolverResults, error) {
 	images, err := s.Cache.LookUpImages(needle, true)
 	if err != nil {
 		return images, err
@@ -1517,7 +669,7 @@ func (s *ScalewayAPI) ResolveImage(needle string) (ScalewayResolverResults, erro
 }
 
 // ResolveBootscript attempts to find a matching Identifier for the input string
-func (s *ScalewayAPI) ResolveBootscript(needle string) (ScalewayResolverResults, error) {
+func (s *ScalewayAPI) ResolveBootscript(needle string) (types.ScalewayResolverResults, error) {
 	bootscripts, err := s.Cache.LookUpBootscripts(needle, true)
 	if err != nil {
 		return bootscripts, err
@@ -1532,7 +684,7 @@ func (s *ScalewayAPI) ResolveBootscript(needle string) (ScalewayResolverResults,
 }
 
 // GetImages gets the list of images from the ScalewayAPI
-func (s *ScalewayAPI) GetImages() (*[]MarketImage, error) {
+func (s *ScalewayAPI) GetImages() (*[]types.MarketImage, error) {
 	images, err := s.GetMarketPlaceImages("")
 	if err != nil {
 		return nil, err
@@ -1562,28 +714,28 @@ func (s *ScalewayAPI) GetImages() (*[]MarketImage, error) {
 	if err != nil {
 		return nil, err
 	}
-	var OrgaImages ScalewayImages
+	var OrgaImages types.ScalewayImages
 
 	if err = json.Unmarshal(body, &OrgaImages); err != nil {
 		return nil, err
 	}
 
 	for _, orgaImage := range OrgaImages.Images {
-		images.Images = append(images.Images, MarketImage{
+		images.Images = append(images.Images, types.MarketImage{
 			Categories:           []string{"MyImages"},
 			CreationDate:         orgaImage.CreationDate,
 			CurrentPublicVersion: orgaImage.Identifier,
 			ModificationDate:     orgaImage.ModificationDate,
 			Name:                 orgaImage.Name,
 			Public:               false,
-			MarketVersions: MarketVersions{
-				Versions: []MarketVersionDefinition{
+			MarketVersions: types.MarketVersions{
+				Versions: []types.MarketVersionDefinition{
 					{
 						CreationDate:     orgaImage.CreationDate,
 						ID:               orgaImage.Identifier,
 						ModificationDate: orgaImage.ModificationDate,
-						MarketLocalImages: MarketLocalImages{
-							LocalImages: []MarketLocalImageDefinition{
+						MarketLocalImages: types.MarketLocalImages{
+							LocalImages: []types.MarketLocalImageDefinition{
 								{
 									Arch: orgaImage.Arch,
 									ID:   orgaImage.Identifier,
@@ -1602,7 +754,7 @@ func (s *ScalewayAPI) GetImages() (*[]MarketImage, error) {
 }
 
 // GetImage gets an image from the ScalewayAPI
-func (s *ScalewayAPI) GetImage(imageID string) (*ScalewayImage, error) {
+func (s *ScalewayAPI) GetImage(imageID string) (*types.ScalewayImage, error) {
 	resp, err := s.GetResponsePaginate(s.computeAPI, "images/"+imageID, url.Values{})
 	if err != nil {
 		return nil, err
@@ -1613,7 +765,7 @@ func (s *ScalewayAPI) GetImage(imageID string) (*ScalewayImage, error) {
 	if err != nil {
 		return nil, err
 	}
-	var oneImage ScalewayOneImage
+	var oneImage types.ScalewayOneImage
 
 	if err = json.Unmarshal(body, &oneImage); err != nil {
 		return nil, err
@@ -1669,7 +821,7 @@ func (s *ScalewayAPI) DeleteVolume(volumeID string) error {
 }
 
 // GetSnapshots gets the list of snapshots from the ScalewayAPI
-func (s *ScalewayAPI) GetSnapshots() (*[]ScalewaySnapshot, error) {
+func (s *ScalewayAPI) GetSnapshots() (*[]types.ScalewaySnapshot, error) {
 	query := url.Values{}
 	s.Cache.ClearSnapshots()
 
@@ -1683,7 +835,7 @@ func (s *ScalewayAPI) GetSnapshots() (*[]ScalewaySnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	var snapshots ScalewaySnapshots
+	var snapshots types.ScalewaySnapshots
 
 	if err = json.Unmarshal(body, &snapshots); err != nil {
 		return nil, err
@@ -1696,7 +848,7 @@ func (s *ScalewayAPI) GetSnapshots() (*[]ScalewaySnapshot, error) {
 }
 
 // GetSnapshot gets a snapshot from the ScalewayAPI
-func (s *ScalewayAPI) GetSnapshot(snapshotID string) (*ScalewaySnapshot, error) {
+func (s *ScalewayAPI) GetSnapshot(snapshotID string) (*types.ScalewaySnapshot, error) {
 	resp, err := s.GetResponsePaginate(s.computeAPI, "snapshots/"+snapshotID, url.Values{})
 	if err != nil {
 		return nil, err
@@ -1707,7 +859,7 @@ func (s *ScalewayAPI) GetSnapshot(snapshotID string) (*ScalewaySnapshot, error) 
 	if err != nil {
 		return nil, err
 	}
-	var oneSnapshot ScalewayOneSnapshot
+	var oneSnapshot types.ScalewayOneSnapshot
 
 	if err = json.Unmarshal(body, &oneSnapshot); err != nil {
 		return nil, err
@@ -1718,7 +870,7 @@ func (s *ScalewayAPI) GetSnapshot(snapshotID string) (*ScalewaySnapshot, error) 
 }
 
 // GetVolumes gets the list of volumes from the ScalewayAPI
-func (s *ScalewayAPI) GetVolumes() (*[]ScalewayVolume, error) {
+func (s *ScalewayAPI) GetVolumes() (*[]types.ScalewayVolume, error) {
 	query := url.Values{}
 	s.Cache.ClearVolumes()
 
@@ -1733,7 +885,7 @@ func (s *ScalewayAPI) GetVolumes() (*[]ScalewayVolume, error) {
 		return nil, err
 	}
 
-	var volumes ScalewayVolumes
+	var volumes types.ScalewayVolumes
 
 	if err = json.Unmarshal(body, &volumes); err != nil {
 		return nil, err
@@ -1746,7 +898,7 @@ func (s *ScalewayAPI) GetVolumes() (*[]ScalewayVolume, error) {
 }
 
 // GetVolume gets a volume from the ScalewayAPI
-func (s *ScalewayAPI) GetVolume(volumeID string) (*ScalewayVolume, error) {
+func (s *ScalewayAPI) GetVolume(volumeID string) (*types.ScalewayVolume, error) {
 	resp, err := s.GetResponsePaginate(s.computeAPI, "volumes/"+volumeID, url.Values{})
 	if err != nil {
 		return nil, err
@@ -1757,7 +909,7 @@ func (s *ScalewayAPI) GetVolume(volumeID string) (*ScalewayVolume, error) {
 	if err != nil {
 		return nil, err
 	}
-	var oneVolume ScalewayOneVolume
+	var oneVolume types.ScalewayOneVolume
 
 	if err = json.Unmarshal(body, &oneVolume); err != nil {
 		return nil, err
@@ -1768,7 +920,7 @@ func (s *ScalewayAPI) GetVolume(volumeID string) (*ScalewayVolume, error) {
 }
 
 // GetBootscripts gets the list of bootscripts from the ScalewayAPI
-func (s *ScalewayAPI) GetBootscripts() (*[]ScalewayBootscript, error) {
+func (s *ScalewayAPI) GetBootscripts() (*[]types.ScalewayBootscript, error) {
 	query := url.Values{}
 
 	s.Cache.ClearBootscripts()
@@ -1782,7 +934,7 @@ func (s *ScalewayAPI) GetBootscripts() (*[]ScalewayBootscript, error) {
 	if err != nil {
 		return nil, err
 	}
-	var bootscripts ScalewayBootscripts
+	var bootscripts types.ScalewayBootscripts
 
 	if err = json.Unmarshal(body, &bootscripts); err != nil {
 		return nil, err
@@ -1795,7 +947,7 @@ func (s *ScalewayAPI) GetBootscripts() (*[]ScalewayBootscript, error) {
 }
 
 // GetBootscript gets a bootscript from the ScalewayAPI
-func (s *ScalewayAPI) GetBootscript(bootscriptID string) (*ScalewayBootscript, error) {
+func (s *ScalewayAPI) GetBootscript(bootscriptID string) (*types.ScalewayBootscript, error) {
 	resp, err := s.GetResponsePaginate(s.computeAPI, "bootscripts/"+bootscriptID, url.Values{})
 	if err != nil {
 		return nil, err
@@ -1806,7 +958,7 @@ func (s *ScalewayAPI) GetBootscript(bootscriptID string) (*ScalewayBootscript, e
 	if err != nil {
 		return nil, err
 	}
-	var oneBootscript ScalewayOneBootscript
+	var oneBootscript types.ScalewayOneBootscript
 
 	if err = json.Unmarshal(body, &oneBootscript); err != nil {
 		return nil, err
@@ -1817,7 +969,7 @@ func (s *ScalewayAPI) GetBootscript(bootscriptID string) (*ScalewayBootscript, e
 }
 
 // GetUserdatas gets list of userdata for a server
-func (s *ScalewayAPI) GetUserdatas(serverID string, metadata bool) (*ScalewayUserdatas, error) {
+func (s *ScalewayAPI) GetUserdatas(serverID string, metadata bool) (*types.ScalewayUserdatas, error) {
 	var uri, endpoint string
 
 	endpoint = s.computeAPI
@@ -1838,7 +990,7 @@ func (s *ScalewayAPI) GetUserdatas(serverID string, metadata bool) (*ScalewayUse
 	if err != nil {
 		return nil, err
 	}
-	var userdatas ScalewayUserdatas
+	var userdatas types.ScalewayUserdatas
 
 	if err = json.Unmarshal(body, &userdatas); err != nil {
 		return nil, err
@@ -1846,12 +998,8 @@ func (s *ScalewayAPI) GetUserdatas(serverID string, metadata bool) (*ScalewayUse
 	return &userdatas, nil
 }
 
-func (s *ScalewayUserdata) String() string {
-	return string(*s)
-}
-
 // GetUserdata gets a specific userdata for a server
-func (s *ScalewayAPI) GetUserdata(serverID, key string, metadata bool) (*ScalewayUserdata, error) {
+func (s *ScalewayAPI) GetUserdata(serverID, key string, metadata bool) (*types.ScalewayUserdata, error) {
 	var uri, endpoint string
 
 	endpoint = s.computeAPI
@@ -1872,7 +1020,7 @@ func (s *ScalewayAPI) GetUserdata(serverID, key string, metadata bool) (*Scalewa
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("no such user_data %q (%d)", key, resp.StatusCode)
 	}
-	var data ScalewayUserdata
+	var data types.ScalewayUserdata
 	data, err = ioutil.ReadAll(resp.Body)
 	return &data, err
 }
@@ -1940,7 +1088,7 @@ func (s *ScalewayAPI) DeleteUserdata(serverID, key string, metadata bool) error 
 }
 
 // GetTasks get the list of tasks from the ScalewayAPI
-func (s *ScalewayAPI) GetTasks() (*[]ScalewayTask, error) {
+func (s *ScalewayAPI) GetTasks() (*[]types.ScalewayTask, error) {
 	query := url.Values{}
 	resp, err := s.GetResponsePaginate(s.computeAPI, "tasks", query)
 	if err != nil {
@@ -1952,7 +1100,7 @@ func (s *ScalewayAPI) GetTasks() (*[]ScalewayTask, error) {
 	if err != nil {
 		return nil, err
 	}
-	var tasks ScalewayTasks
+	var tasks types.ScalewayTasks
 
 	if err = json.Unmarshal(body, &tasks); err != nil {
 		return nil, err
@@ -1974,7 +1122,7 @@ func (s *ScalewayAPI) CheckCredentials() error {
 		return err
 	}
 	found := false
-	var tokens ScalewayGetTokens
+	var tokens types.ScalewayGetTokens
 
 	if err = json.Unmarshal(body, &tokens); err != nil {
 		return err
@@ -2003,7 +1151,7 @@ func (s *ScalewayAPI) GetUserID() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var token ScalewayTokensDefinition
+	var token types.ScalewayTokensDefinition
 
 	if err = json.Unmarshal(body, &token); err != nil {
 		return "", err
@@ -2012,7 +1160,7 @@ func (s *ScalewayAPI) GetUserID() (string, error) {
 }
 
 // GetOrganization returns Organization
-func (s *ScalewayAPI) GetOrganization() (*ScalewayOrganizationsDefinition, error) {
+func (s *ScalewayAPI) GetOrganization() (*types.ScalewayOrganizationsDefinition, error) {
 	resp, err := s.GetResponsePaginate(AccountAPI, "organizations", url.Values{})
 	if err != nil {
 		return nil, err
@@ -2023,7 +1171,7 @@ func (s *ScalewayAPI) GetOrganization() (*ScalewayOrganizationsDefinition, error
 	if err != nil {
 		return nil, err
 	}
-	var data ScalewayOrganizationsDefinition
+	var data types.ScalewayOrganizationsDefinition
 
 	if err = json.Unmarshal(body, &data); err != nil {
 		return nil, err
@@ -2032,7 +1180,7 @@ func (s *ScalewayAPI) GetOrganization() (*ScalewayOrganizationsDefinition, error
 }
 
 // GetUser returns the user
-func (s *ScalewayAPI) GetUser() (*ScalewayUserDefinition, error) {
+func (s *ScalewayAPI) GetUser() (*types.ScalewayUserDefinition, error) {
 	userID, err := s.GetUserID()
 	if err != nil {
 		return nil, err
@@ -2047,7 +1195,7 @@ func (s *ScalewayAPI) GetUser() (*ScalewayUserDefinition, error) {
 	if err != nil {
 		return nil, err
 	}
-	var user ScalewayUsersDefinition
+	var user types.ScalewayUsersDefinition
 
 	if err = json.Unmarshal(body, &user); err != nil {
 		return nil, err
@@ -2056,7 +1204,7 @@ func (s *ScalewayAPI) GetUser() (*ScalewayUserDefinition, error) {
 }
 
 // GetPermissions returns the permissions
-func (s *ScalewayAPI) GetPermissions() (*ScalewayPermissionDefinition, error) {
+func (s *ScalewayAPI) GetPermissions() (*types.ScalewayPermissionDefinition, error) {
 	resp, err := s.GetResponsePaginate(AccountAPI, fmt.Sprintf("tokens/%s/permissions", s.Token), url.Values{})
 	if err != nil {
 		return nil, err
@@ -2067,7 +1215,7 @@ func (s *ScalewayAPI) GetPermissions() (*ScalewayPermissionDefinition, error) {
 	if err != nil {
 		return nil, err
 	}
-	var permissions ScalewayPermissionDefinition
+	var permissions types.ScalewayPermissionDefinition
 
 	if err = json.Unmarshal(body, &permissions); err != nil {
 		return nil, err
@@ -2076,7 +1224,7 @@ func (s *ScalewayAPI) GetPermissions() (*ScalewayPermissionDefinition, error) {
 }
 
 // GetDashboard returns the dashboard
-func (s *ScalewayAPI) GetDashboard() (*ScalewayDashboard, error) {
+func (s *ScalewayAPI) GetDashboard() (*types.ScalewayDashboard, error) {
 	resp, err := s.GetResponsePaginate(s.computeAPI, "dashboard", url.Values{})
 	if err != nil {
 		return nil, err
@@ -2087,7 +1235,7 @@ func (s *ScalewayAPI) GetDashboard() (*ScalewayDashboard, error) {
 	if err != nil {
 		return nil, err
 	}
-	var dashboard ScalewayDashboardResp
+	var dashboard types.ScalewayDashboardResp
 
 	if err = json.Unmarshal(body, &dashboard); err != nil {
 		return nil, err
@@ -2098,7 +1246,7 @@ func (s *ScalewayAPI) GetDashboard() (*ScalewayDashboard, error) {
 // GetServerID returns exactly one server matching
 func (s *ScalewayAPI) GetServerID(needle string) (string, error) {
 	// Parses optional type prefix, i.e: "server:name" -> "name"
-	_, needle = parseNeedle(needle)
+	_, needle = types.ParseNeedle(needle)
 
 	servers, err := s.ResolveServer(needle)
 	if err != nil {
@@ -2113,7 +1261,7 @@ func (s *ScalewayAPI) GetServerID(needle string) (string, error) {
 	return "", showResolverResults(needle, servers)
 }
 
-func showResolverResults(needle string, results ScalewayResolverResults) error {
+func showResolverResults(needle string, results types.ScalewayResolverResults) error {
 	w := tabwriter.NewWriter(os.Stderr, 20, 1, 3, ' ', 0)
 	defer w.Flush()
 	sort.Sort(results)
@@ -2130,7 +1278,7 @@ func showResolverResults(needle string, results ScalewayResolverResults) error {
 // GetVolumeID returns exactly one volume matching
 func (s *ScalewayAPI) GetVolumeID(needle string) (string, error) {
 	// Parses optional type prefix, i.e: "volume:name" -> "name"
-	_, needle = parseNeedle(needle)
+	_, needle = types.ParseNeedle(needle)
 
 	volumes, err := s.ResolveVolume(needle)
 	if err != nil {
@@ -2148,7 +1296,7 @@ func (s *ScalewayAPI) GetVolumeID(needle string) (string, error) {
 // GetSnapshotID returns exactly one snapshot matching
 func (s *ScalewayAPI) GetSnapshotID(needle string) (string, error) {
 	// Parses optional type prefix, i.e: "snapshot:name" -> "name"
-	_, needle = parseNeedle(needle)
+	_, needle = types.ParseNeedle(needle)
 
 	snapshots, err := s.ResolveSnapshot(needle)
 	if err != nil {
@@ -2164,7 +1312,7 @@ func (s *ScalewayAPI) GetSnapshotID(needle string) (string, error) {
 }
 
 // FilterImagesByArch removes entry that doesn't match with architecture
-func FilterImagesByArch(res ScalewayResolverResults, arch string) (ret ScalewayResolverResults) {
+func FilterImagesByArch(res types.ScalewayResolverResults, arch string) (ret types.ScalewayResolverResults) {
 	if arch == "*" {
 		return res
 	}
@@ -2177,7 +1325,7 @@ func FilterImagesByArch(res ScalewayResolverResults, arch string) (ret ScalewayR
 }
 
 // FilterImagesByRegion removes entry that doesn't match with region
-func FilterImagesByRegion(res ScalewayResolverResults, region string) (ret ScalewayResolverResults) {
+func FilterImagesByRegion(res types.ScalewayResolverResults, region string) (ret types.ScalewayResolverResults) {
 	if region == "*" {
 		return res
 	}
@@ -2190,9 +1338,9 @@ func FilterImagesByRegion(res ScalewayResolverResults, region string) (ret Scale
 }
 
 // GetImageID returns exactly one image matching
-func (s *ScalewayAPI) GetImageID(needle, arch string) (*ScalewayImageIdentifier, error) {
+func (s *ScalewayAPI) GetImageID(needle, arch string) (*types.ScalewayImageIdentifier, error) {
 	// Parses optional type prefix, i.e: "image:name" -> "name"
-	_, needle = parseNeedle(needle)
+	_, needle = types.ParseNeedle(needle)
 
 	images, err := s.ResolveImage(needle)
 	if err != nil {
@@ -2201,7 +1349,7 @@ func (s *ScalewayAPI) GetImageID(needle, arch string) (*ScalewayImageIdentifier,
 	images = FilterImagesByArch(images, arch)
 	images = FilterImagesByRegion(images, s.Region)
 	if len(images) == 1 {
-		return &ScalewayImageIdentifier{
+		return &types.ScalewayImageIdentifier{
 			Identifier: images[0].Identifier,
 			Arch:       images[0].Arch,
 			// FIXME region, owner hardcoded
@@ -2216,7 +1364,7 @@ func (s *ScalewayAPI) GetImageID(needle, arch string) (*ScalewayImageIdentifier,
 }
 
 // GetSecurityGroups returns a ScalewaySecurityGroups
-func (s *ScalewayAPI) GetSecurityGroups() (*ScalewayGetSecurityGroups, error) {
+func (s *ScalewayAPI) GetSecurityGroups() (*types.ScalewayGetSecurityGroups, error) {
 	resp, err := s.GetResponsePaginate(s.computeAPI, "security_groups", url.Values{})
 	if err != nil {
 		return nil, err
@@ -2227,7 +1375,7 @@ func (s *ScalewayAPI) GetSecurityGroups() (*ScalewayGetSecurityGroups, error) {
 	if err != nil {
 		return nil, err
 	}
-	var securityGroups ScalewayGetSecurityGroups
+	var securityGroups types.ScalewayGetSecurityGroups
 
 	if err = json.Unmarshal(body, &securityGroups); err != nil {
 		return nil, err
@@ -2236,7 +1384,7 @@ func (s *ScalewayAPI) GetSecurityGroups() (*ScalewayGetSecurityGroups, error) {
 }
 
 // GetSecurityGroupRules returns a ScalewaySecurityGroupRules
-func (s *ScalewayAPI) GetSecurityGroupRules(groupID string) (*ScalewayGetSecurityGroupRules, error) {
+func (s *ScalewayAPI) GetSecurityGroupRules(groupID string) (*types.ScalewayGetSecurityGroupRules, error) {
 	resp, err := s.GetResponsePaginate(s.computeAPI, fmt.Sprintf("security_groups/%s/rules", groupID), url.Values{})
 	if err != nil {
 		return nil, err
@@ -2247,7 +1395,7 @@ func (s *ScalewayAPI) GetSecurityGroupRules(groupID string) (*ScalewayGetSecurit
 	if err != nil {
 		return nil, err
 	}
-	var securityGroupRules ScalewayGetSecurityGroupRules
+	var securityGroupRules types.ScalewayGetSecurityGroupRules
 
 	if err = json.Unmarshal(body, &securityGroupRules); err != nil {
 		return nil, err
@@ -2256,7 +1404,7 @@ func (s *ScalewayAPI) GetSecurityGroupRules(groupID string) (*ScalewayGetSecurit
 }
 
 // GetASecurityGroupRule returns a ScalewaySecurityGroupRule
-func (s *ScalewayAPI) GetASecurityGroupRule(groupID string, rulesID string) (*ScalewayGetSecurityGroupRule, error) {
+func (s *ScalewayAPI) GetASecurityGroupRule(groupID string, rulesID string) (*types.ScalewayGetSecurityGroupRule, error) {
 	resp, err := s.GetResponsePaginate(s.computeAPI, fmt.Sprintf("security_groups/%s/rules/%s", groupID, rulesID), url.Values{})
 	if err != nil {
 		return nil, err
@@ -2267,7 +1415,7 @@ func (s *ScalewayAPI) GetASecurityGroupRule(groupID string, rulesID string) (*Sc
 	if err != nil {
 		return nil, err
 	}
-	var securityGroupRules ScalewayGetSecurityGroupRule
+	var securityGroupRules types.ScalewayGetSecurityGroupRule
 
 	if err = json.Unmarshal(body, &securityGroupRules); err != nil {
 		return nil, err
@@ -2276,7 +1424,7 @@ func (s *ScalewayAPI) GetASecurityGroupRule(groupID string, rulesID string) (*Sc
 }
 
 // GetASecurityGroup returns a ScalewaySecurityGroup
-func (s *ScalewayAPI) GetASecurityGroup(groupsID string) (*ScalewayGetSecurityGroup, error) {
+func (s *ScalewayAPI) GetASecurityGroup(groupsID string) (*types.ScalewayGetSecurityGroup, error) {
 	resp, err := s.GetResponsePaginate(s.computeAPI, fmt.Sprintf("security_groups/%s", groupsID), url.Values{})
 	if err != nil {
 		return nil, err
@@ -2287,7 +1435,7 @@ func (s *ScalewayAPI) GetASecurityGroup(groupsID string) (*ScalewayGetSecurityGr
 	if err != nil {
 		return nil, err
 	}
-	var securityGroups ScalewayGetSecurityGroup
+	var securityGroups types.ScalewayGetSecurityGroup
 
 	if err = json.Unmarshal(body, &securityGroups); err != nil {
 		return nil, err
@@ -2296,7 +1444,7 @@ func (s *ScalewayAPI) GetASecurityGroup(groupsID string) (*ScalewayGetSecurityGr
 }
 
 // PostSecurityGroup posts a group on a server
-func (s *ScalewayAPI) PostSecurityGroup(group ScalewayNewSecurityGroup) error {
+func (s *ScalewayAPI) PostSecurityGroup(group types.ScalewayNewSecurityGroup) error {
 	resp, err := s.PostResponse(s.computeAPI, "security_groups", group)
 	if err != nil {
 		return err
@@ -2308,7 +1456,7 @@ func (s *ScalewayAPI) PostSecurityGroup(group ScalewayNewSecurityGroup) error {
 }
 
 // PostSecurityGroupRule posts a rule on a server
-func (s *ScalewayAPI) PostSecurityGroupRule(SecurityGroupID string, rules ScalewayNewSecurityGroupRule) error {
+func (s *ScalewayAPI) PostSecurityGroupRule(SecurityGroupID string, rules types.ScalewayNewSecurityGroupRule) error {
 	resp, err := s.PostResponse(s.computeAPI, fmt.Sprintf("security_groups/%s/rules", SecurityGroupID), rules)
 	if err != nil {
 		return err
@@ -2332,7 +1480,7 @@ func (s *ScalewayAPI) DeleteSecurityGroup(securityGroupID string) error {
 }
 
 // PutSecurityGroup updates a SecurityGroup
-func (s *ScalewayAPI) PutSecurityGroup(group ScalewayUpdateSecurityGroup, securityGroupID string) error {
+func (s *ScalewayAPI) PutSecurityGroup(group types.ScalewayUpdateSecurityGroup, securityGroupID string) error {
 	resp, err := s.PutResponse(s.computeAPI, fmt.Sprintf("security_groups/%s", securityGroupID), group)
 	if err != nil {
 		return err
@@ -2344,7 +1492,7 @@ func (s *ScalewayAPI) PutSecurityGroup(group ScalewayUpdateSecurityGroup, securi
 }
 
 // PutSecurityGroupRule updates a SecurityGroupRule
-func (s *ScalewayAPI) PutSecurityGroupRule(rules ScalewayNewSecurityGroupRule, securityGroupID, RuleID string) error {
+func (s *ScalewayAPI) PutSecurityGroupRule(rules types.ScalewayNewSecurityGroupRule, securityGroupID, RuleID string) error {
 	resp, err := s.PutResponse(s.computeAPI, fmt.Sprintf("security_groups/%s/rules/%s", securityGroupID, RuleID), rules)
 	if err != nil {
 		return err
@@ -2367,8 +1515,8 @@ func (s *ScalewayAPI) DeleteSecurityGroupRule(SecurityGroupID, RuleID string) er
 	return err
 }
 
-// GetContainers returns a ScalewayGetContainers
-func (s *ScalewayAPI) GetContainers() (*ScalewayGetContainers, error) {
+// GetContainers returns a types.ScalewayGetContainers
+func (s *ScalewayAPI) GetContainers() (*types.ScalewayGetContainers, error) {
 	resp, err := s.GetResponsePaginate(s.computeAPI, "containers", url.Values{})
 	if err != nil {
 		return nil, err
@@ -2379,7 +1527,7 @@ func (s *ScalewayAPI) GetContainers() (*ScalewayGetContainers, error) {
 	if err != nil {
 		return nil, err
 	}
-	var containers ScalewayGetContainers
+	var containers types.ScalewayGetContainers
 
 	if err = json.Unmarshal(body, &containers); err != nil {
 		return nil, err
@@ -2387,8 +1535,8 @@ func (s *ScalewayAPI) GetContainers() (*ScalewayGetContainers, error) {
 	return &containers, nil
 }
 
-// GetContainerDatas returns a ScalewayGetContainerDatas
-func (s *ScalewayAPI) GetContainerDatas(container string) (*ScalewayGetContainerDatas, error) {
+// GetContainerDatas returns a types.ScalewayGetContainerDatas
+func (s *ScalewayAPI) GetContainerDatas(container string) (*types.ScalewayGetContainerDatas, error) {
 	resp, err := s.GetResponsePaginate(s.computeAPI, fmt.Sprintf("containers/%s", container), url.Values{})
 	if err != nil {
 		return nil, err
@@ -2399,7 +1547,7 @@ func (s *ScalewayAPI) GetContainerDatas(container string) (*ScalewayGetContainer
 	if err != nil {
 		return nil, err
 	}
-	var datas ScalewayGetContainerDatas
+	var datas types.ScalewayGetContainerDatas
 
 	if err = json.Unmarshal(body, &datas); err != nil {
 		return nil, err
@@ -2407,8 +1555,8 @@ func (s *ScalewayAPI) GetContainerDatas(container string) (*ScalewayGetContainer
 	return &datas, nil
 }
 
-// GetIPS returns a ScalewayGetIPS
-func (s *ScalewayAPI) GetIPS() (*ScalewayGetIPS, error) {
+// GetIPS returns a types.ScalewayGetIPS
+func (s *ScalewayAPI) GetIPS() (*types.ScalewayGetIPS, error) {
 	resp, err := s.GetResponsePaginate(s.computeAPI, "ips", url.Values{})
 	if err != nil {
 		return nil, err
@@ -2419,7 +1567,7 @@ func (s *ScalewayAPI) GetIPS() (*ScalewayGetIPS, error) {
 	if err != nil {
 		return nil, err
 	}
-	var ips ScalewayGetIPS
+	var ips types.ScalewayGetIPS
 
 	if err = json.Unmarshal(body, &ips); err != nil {
 		return nil, err
@@ -2428,7 +1576,7 @@ func (s *ScalewayAPI) GetIPS() (*ScalewayGetIPS, error) {
 }
 
 // NewIP returns a new IP
-func (s *ScalewayAPI) NewIP() (*ScalewayGetIP, error) {
+func (s *ScalewayAPI) NewIP() (*types.ScalewayGetIP, error) {
 	var orga struct {
 		Organization string `json:"organization"`
 	}
@@ -2443,7 +1591,7 @@ func (s *ScalewayAPI) NewIP() (*ScalewayGetIP, error) {
 	if err != nil {
 		return nil, err
 	}
-	var ip ScalewayGetIP
+	var ip types.ScalewayGetIP
 
 	if err = json.Unmarshal(body, &ip); err != nil {
 		return nil, err
@@ -2504,8 +1652,8 @@ func (s *ScalewayAPI) DeleteIP(ipID string) error {
 	return err
 }
 
-// GetIP returns a ScalewayGetIP
-func (s *ScalewayAPI) GetIP(ipID string) (*ScalewayGetIP, error) {
+// GetIP returns a types.ScalewayGetIP
+func (s *ScalewayAPI) GetIP(ipID string) (*types.ScalewayGetIP, error) {
 	resp, err := s.GetResponsePaginate(s.computeAPI, fmt.Sprintf("ips/%s", ipID), url.Values{})
 	if err != nil {
 		return nil, err
@@ -2516,7 +1664,7 @@ func (s *ScalewayAPI) GetIP(ipID string) (*ScalewayGetIP, error) {
 	if err != nil {
 		return nil, err
 	}
-	var ip ScalewayGetIP
+	var ip types.ScalewayGetIP
 
 	if err = json.Unmarshal(body, &ip); err != nil {
 		return nil, err
@@ -2524,8 +1672,8 @@ func (s *ScalewayAPI) GetIP(ipID string) (*ScalewayGetIP, error) {
 	return &ip, nil
 }
 
-// GetQuotas returns a ScalewayGetQuotas
-func (s *ScalewayAPI) GetQuotas() (*ScalewayGetQuotas, error) {
+// GetQuotas returns a types.ScalewayGetQuotas
+func (s *ScalewayAPI) GetQuotas() (*types.ScalewayGetQuotas, error) {
 	resp, err := s.GetResponsePaginate(AccountAPI, fmt.Sprintf("organizations/%s/quotas", s.Organization), url.Values{})
 	if err != nil {
 		return nil, err
@@ -2536,7 +1684,7 @@ func (s *ScalewayAPI) GetQuotas() (*ScalewayGetQuotas, error) {
 	if err != nil {
 		return nil, err
 	}
-	var quotas ScalewayGetQuotas
+	var quotas types.ScalewayGetQuotas
 
 	if err = json.Unmarshal(body, &quotas); err != nil {
 		return nil, err
@@ -2547,7 +1695,7 @@ func (s *ScalewayAPI) GetQuotas() (*ScalewayGetQuotas, error) {
 // GetBootscriptID returns exactly one bootscript matching
 func (s *ScalewayAPI) GetBootscriptID(needle, arch string) (string, error) {
 	// Parses optional type prefix, i.e: "bootscript:name" -> "name"
-	_, needle = parseNeedle(needle)
+	_, needle = types.ParseNeedle(needle)
 
 	bootscripts, err := s.ResolveBootscript(needle)
 	if err != nil {
@@ -2600,7 +1748,7 @@ func (s *ScalewayAPI) SetPassword(password string) {
 }
 
 // GetMarketPlaceImages returns images from marketplace
-func (s *ScalewayAPI) GetMarketPlaceImages(uuidImage string) (*MarketImages, error) {
+func (s *ScalewayAPI) GetMarketPlaceImages(uuidImage string) (*types.MarketImages, error) {
 	resp, err := s.GetResponsePaginate(MarketplaceAPI, fmt.Sprintf("images/%s", uuidImage), url.Values{})
 	if err != nil {
 		return nil, err
@@ -2611,12 +1759,12 @@ func (s *ScalewayAPI) GetMarketPlaceImages(uuidImage string) (*MarketImages, err
 	if err != nil {
 		return nil, err
 	}
-	var ret MarketImages
+	var ret types.MarketImages
 
 	if uuidImage != "" {
-		ret.Images = make([]MarketImage, 1)
+		ret.Images = make([]types.MarketImage, 1)
 
-		var img MarketImage
+		var img types.MarketImage
 
 		if err = json.Unmarshal(body, &img); err != nil {
 			return nil, err
@@ -2631,7 +1779,7 @@ func (s *ScalewayAPI) GetMarketPlaceImages(uuidImage string) (*MarketImages, err
 }
 
 // GetMarketPlaceImageVersions returns image version
-func (s *ScalewayAPI) GetMarketPlaceImageVersions(uuidImage, uuidVersion string) (*MarketVersions, error) {
+func (s *ScalewayAPI) GetMarketPlaceImageVersions(uuidImage, uuidVersion string) (*types.MarketVersions, error) {
 	resp, err := s.GetResponsePaginate(MarketplaceAPI, fmt.Sprintf("images/%v/versions/%s", uuidImage, uuidVersion), url.Values{})
 	if err != nil {
 		return nil, err
@@ -2642,11 +1790,11 @@ func (s *ScalewayAPI) GetMarketPlaceImageVersions(uuidImage, uuidVersion string)
 	if err != nil {
 		return nil, err
 	}
-	var ret MarketVersions
+	var ret types.MarketVersions
 
 	if uuidImage != "" {
-		var version MarketVersion
-		ret.Versions = make([]MarketVersionDefinition, 1)
+		var version types.MarketVersion
+		ret.Versions = make([]types.MarketVersionDefinition, 1)
 
 		if err = json.Unmarshal(body, &version); err != nil {
 			return nil, err
@@ -2661,7 +1809,7 @@ func (s *ScalewayAPI) GetMarketPlaceImageVersions(uuidImage, uuidVersion string)
 }
 
 // GetMarketPlaceImageCurrentVersion return the image current version
-func (s *ScalewayAPI) GetMarketPlaceImageCurrentVersion(uuidImage string) (*MarketVersion, error) {
+func (s *ScalewayAPI) GetMarketPlaceImageCurrentVersion(uuidImage string) (*types.MarketVersion, error) {
 	resp, err := s.GetResponsePaginate(MarketplaceAPI, fmt.Sprintf("images/%v/versions/current", uuidImage), url.Values{})
 	if err != nil {
 		return nil, err
@@ -2672,7 +1820,7 @@ func (s *ScalewayAPI) GetMarketPlaceImageCurrentVersion(uuidImage string) (*Mark
 	if err != nil {
 		return nil, err
 	}
-	var ret MarketVersion
+	var ret types.MarketVersion
 
 	if err = json.Unmarshal(body, &ret); err != nil {
 		return nil, err
@@ -2681,7 +1829,7 @@ func (s *ScalewayAPI) GetMarketPlaceImageCurrentVersion(uuidImage string) (*Mark
 }
 
 // GetMarketPlaceLocalImages returns images from local region
-func (s *ScalewayAPI) GetMarketPlaceLocalImages(uuidImage, uuidVersion, uuidLocalImage string) (*MarketLocalImages, error) {
+func (s *ScalewayAPI) GetMarketPlaceLocalImages(uuidImage, uuidVersion, uuidLocalImage string) (*types.MarketLocalImages, error) {
 	resp, err := s.GetResponsePaginate(MarketplaceAPI, fmt.Sprintf("images/%v/versions/%s/local_images/%s", uuidImage, uuidVersion, uuidLocalImage), url.Values{})
 	if err != nil {
 		return nil, err
@@ -2691,10 +1839,10 @@ func (s *ScalewayAPI) GetMarketPlaceLocalImages(uuidImage, uuidVersion, uuidLoca
 	if err != nil {
 		return nil, err
 	}
-	var ret MarketLocalImages
+	var ret types.MarketLocalImages
 	if uuidLocalImage != "" {
-		var localImage MarketLocalImage
-		ret.LocalImages = make([]MarketLocalImageDefinition, 1)
+		var localImage types.MarketLocalImage
+		ret.LocalImages = make([]types.MarketLocalImageDefinition, 1)
 
 		if err = json.Unmarshal(body, &localImage); err != nil {
 			return nil, err
@@ -2709,7 +1857,7 @@ func (s *ScalewayAPI) GetMarketPlaceLocalImages(uuidImage, uuidVersion, uuidLoca
 }
 
 // PostMarketPlaceImage adds new image
-func (s *ScalewayAPI) PostMarketPlaceImage(images MarketImage) error {
+func (s *ScalewayAPI) PostMarketPlaceImage(images types.MarketImage) error {
 	resp, err := s.PostResponse(MarketplaceAPI, "images/", images)
 	if err != nil {
 		return err
@@ -2720,7 +1868,7 @@ func (s *ScalewayAPI) PostMarketPlaceImage(images MarketImage) error {
 }
 
 // PostMarketPlaceImageVersion adds new image version
-func (s *ScalewayAPI) PostMarketPlaceImageVersion(uuidImage string, version MarketVersion) error {
+func (s *ScalewayAPI) PostMarketPlaceImageVersion(uuidImage string, version types.MarketVersion) error {
 	resp, err := s.PostResponse(MarketplaceAPI, fmt.Sprintf("images/%v/versions", uuidImage), version)
 	if err != nil {
 		return err
@@ -2731,7 +1879,7 @@ func (s *ScalewayAPI) PostMarketPlaceImageVersion(uuidImage string, version Mark
 }
 
 // PostMarketPlaceLocalImage adds new local image
-func (s *ScalewayAPI) PostMarketPlaceLocalImage(uuidImage, uuidVersion, uuidLocalImage string, local MarketLocalImage) error {
+func (s *ScalewayAPI) PostMarketPlaceLocalImage(uuidImage, uuidVersion, uuidLocalImage string, local types.MarketLocalImage) error {
 	resp, err := s.PostResponse(MarketplaceAPI, fmt.Sprintf("images/%v/versions/%s/local_images/%v", uuidImage, uuidVersion, uuidLocalImage), local)
 	if err != nil {
 		return err
@@ -2742,7 +1890,7 @@ func (s *ScalewayAPI) PostMarketPlaceLocalImage(uuidImage, uuidVersion, uuidLoca
 }
 
 // PutMarketPlaceImage updates image
-func (s *ScalewayAPI) PutMarketPlaceImage(uudiImage string, images MarketImage) error {
+func (s *ScalewayAPI) PutMarketPlaceImage(uudiImage string, images types.MarketImage) error {
 	resp, err := s.PutResponse(MarketplaceAPI, fmt.Sprintf("images/%v", uudiImage), images)
 	if err != nil {
 		return err
@@ -2753,7 +1901,7 @@ func (s *ScalewayAPI) PutMarketPlaceImage(uudiImage string, images MarketImage) 
 }
 
 // PutMarketPlaceImageVersion updates image version
-func (s *ScalewayAPI) PutMarketPlaceImageVersion(uuidImage, uuidVersion string, version MarketVersion) error {
+func (s *ScalewayAPI) PutMarketPlaceImageVersion(uuidImage, uuidVersion string, version types.MarketVersion) error {
 	resp, err := s.PutResponse(MarketplaceAPI, fmt.Sprintf("images/%v/versions/%v", uuidImage, uuidVersion), version)
 	if err != nil {
 		return err
@@ -2764,7 +1912,7 @@ func (s *ScalewayAPI) PutMarketPlaceImageVersion(uuidImage, uuidVersion string, 
 }
 
 // PutMarketPlaceLocalImage updates local image
-func (s *ScalewayAPI) PutMarketPlaceLocalImage(uuidImage, uuidVersion, uuidLocalImage string, local MarketLocalImage) error {
+func (s *ScalewayAPI) PutMarketPlaceLocalImage(uuidImage, uuidVersion, uuidLocalImage string, local types.MarketLocalImage) error {
 	resp, err := s.PostResponse(MarketplaceAPI, fmt.Sprintf("images/%v/versions/%s/local_images/%v", uuidImage, uuidVersion, uuidLocalImage), local)
 	if err != nil {
 		return err
@@ -2819,7 +1967,7 @@ func (s *ScalewayAPI) ResolveTTYUrl() string {
 }
 
 // GetProductServers Fetches all the server type and their constraints from the Products API
-func (s *ScalewayAPI) GetProductsServers() (*ScalewayProductsServers, error) {
+func (s *ScalewayAPI) GetProductsServers() (*types.ScalewayProductsServers, error) {
 	resp, err := s.GetResponsePaginate(s.computeAPI, "products/servers", url.Values{})
 	if err != nil {
 		return nil, err
@@ -2831,10 +1979,25 @@ func (s *ScalewayAPI) GetProductsServers() (*ScalewayProductsServers, error) {
 		return nil, err
 	}
 
-	var productServers ScalewayProductsServers
+	var productServers types.ScalewayProductsServers
 	if err = json.Unmarshal(body, &productServers); err != nil {
 		return nil, err
 	}
 
 	return &productServers, nil
+}
+
+// HideAPICredentials removes API credentials from a string
+func (s *ScalewayAPI) HideAPICredentials(input string) string {
+	output := input
+	if s.Token != "" {
+		output = strings.Replace(output, s.Token, "00000000-0000-4000-8000-000000000000", -1)
+	}
+	if s.Organization != "" {
+		output = strings.Replace(output, s.Organization, "00000000-0000-5000-9000-000000000000", -1)
+	}
+	if s.password != "" {
+		output = strings.Replace(output, s.password, "XX-XX-XX-XX", -1)
+	}
+	return output
 }
