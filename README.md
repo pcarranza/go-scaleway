@@ -1,6 +1,6 @@
-# Scaleway's API
+# Scaleway's API golang client
 
-[![GoDoc](https://godoc.org/github.com/scaleway/scaleway-cli/pkg/api?status.svg)](https://godoc.org/github.com/scaleway/scaleway-cli/pkg/api)
+[![GoDoc](https://godoc.org/github.com/scaleway/go-scaleway?status.svg)](https://godoc.org/github.com/scaleway/go-scaleway)
 
 This package contains facilities to play with the Scaleway API, it includes the following features:
 
