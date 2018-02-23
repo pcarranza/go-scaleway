@@ -1,0 +1,11 @@
+version: 2
+
+jobs:
+  build:
+    working_directory: /go/src/github.com/scaleway/go-scaleway
+    docker:
+      - image: circleci/golang:latest
+    steps:
+      - checkout
+      - run: go get -v -t ./...
+      - run: make test
