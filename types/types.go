@@ -670,6 +670,9 @@ type ScalewayServerDefinition struct {
 	// DynamicIPRequired is a flag that defines a server with a dynamic ip address attached
 	DynamicIPRequired *bool `json:"dynamic_ip_required,omitempty"`
 
+	// BootType defines the type of boot
+	BootType string `json:"boot_type,omitempty"`
+
 	// Bootscript is the bootscript used by the server
 	Bootscript *string `json:"bootscript"`
 
